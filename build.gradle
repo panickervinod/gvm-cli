@@ -6,35 +6,21 @@ buildscript {
     }
 }
 
-apply plugin: 'groovy'
-apply plugin: 'idea'
-apply plugin: 'eclipse'
+plugins {
+		id "com.gradle.build-scan" version "1.0"
+    id "com.jfrog.bintray" version "1.7"
+}
 
-defaultTasks 'clean', 'prepareTestScripts', 'prepareScripts', 'prepareServer', 'prepareTemplates', 'assembleArchive', 'test'
+buildScan {
+    licenseAgreementUrl = 'https://gradle.com/terms-of-service'
+    licenseAgree = 'yes'
+}
+
+apply plugin: 'groovy'
 
 def userHome = System.getProperty('user.home')
-ext.installBinDir = "${userHome}/.gvm/bin"
-ext.installSrcDir = "${userHome}/.gvm/src"
-
-ext.defaultGvmVersion = '1.0.0-SNAPSHOT'
-
-loadConfiguration()
-
-repositories {
-    jcenter()
-}
-
-dependencies {
-    compile 'org.codehaus.groovy:groovy:2.3.7'
-    compile 'org.codehaus.groovy:groovy-templates:2.3.7'
-    testCompile 'junit:junit:4.11'
-    testCompile 'info.cukes:cucumber-groovy:1.1.8'
-    testCompile 'info.cukes:cucumber-junit:1.1.8'
-    testCompile 'org.spockframework:spock-core:0.7-groovy-2.0'
-    testCompile 'com.github.tomakehurst:wiremock:1.46'
-}
-
-test.testLogging.exceptionFormat = 'full'
+ext.installBinDir = "${userHome}/.sdkman/bin"
+ext.installSrcDir = "${userHome}/.sdkman/src"
 
 def loadConfiguration() {
     def environment = hasProperty('env') ? env : 'local'
@@ -46,32 +32,29 @@ def loadConfiguration() {
     ext.config = config
 }
 
-task prepareTemplates(type: Copy) {
-	from "src/main/templates"
-	into "build/templates"
-	include "*.gtpl"
+loadConfiguration()
+
+ext.buildNumber = System.getenv("TRAVIS_BUILD_NUMBER") ?: '0'
+ext.sdkmanCliBuildVersion = "${config.sdkmanCliVersion}+${buildNumber}".toString()
+
+repositories {
+    jcenter()
 }
 
-task prepareServer(type: Copy){
-	from 'src/main/vertx'
-	into 'build/server'
-	include 'server.groovy'
-	filter(ReplaceTokens, tokens: [GVM_VERSION:config.gvmVersion ?: defaultGvmVersion, VERTX_VERSION:config.vertxVersion])
+dependencies {
+    compile 'org.codehaus.groovy:groovy:2.4.5'
+    compile 'org.codehaus.groovy:groovy-templates:2.4.5'
+    compile 'org.codehaus.groovy:groovy-json:2.4.5'
+    testCompile 'junit:junit:4.11'
+    testCompile 'info.cukes:cucumber-groovy:1.1.8'
+    testCompile 'info.cukes:cucumber-junit:1.1.8'
+    testCompile('org.spockframework:spock-core:0.7-groovy-2.0') {
+        exclude module: 'groovy-all'
+    }
+    testCompile 'com.github.tomakehurst:wiremock:1.46'
 }
 
-task prepareTestScripts(type: Copy) {
-    from 'src/main/bash'
-    into 'build/testScripts'
-    include '**/*'
-    filter(ReplaceTokens, tokens:
-        [
-            GVM_VERSION          : "x.y.z",
-            GVM_SERVICE          : config.gvmService,
-            GVM_BROKER_SERVICE   : config.gvmBrokerService,
-            GVM_BROADCAST_SERVICE: config.gvmBroadcastService
-        ]
-    )
-}
+test.testLogging.exceptionFormat = 'full'
 
 task prepareScripts(type: Copy) {
     from 'src/main/bash'
@@ -79,22 +62,27 @@ task prepareScripts(type: Copy) {
     include '**/*'
     filter(ReplaceTokens, tokens:
         [
-            GVM_VERSION          : config.gvmVersion ?: defaultGvmVersion,
-            GVM_SERVICE          : config.gvmService,
-            GVM_BROKER_SERVICE   : config.gvmBrokerService,
-            GVM_BROADCAST_SERVICE: config.gvmBroadcastService
+            SDKMAN_VERSION          : sdkmanCliBuildVersion,
+            SDKMAN_SERVICE          : config.sdkmanService,
+            SDKMAN_BROKER_SERVICE   : config.sdkmanBrokerService,
+            SDKMAN_BROADCAST_SERVICE: config.sdkmanBroadcastService
         ]
     )
 }
 
-task assembleArchive(type: Zip) {
-	classifier = 'scripts'
-	from "build/scripts"
-	include "gvm*"
+test.dependsOn prepareScripts
+
+task assembleArchive(type: Zip, dependsOn: prepareScripts) {
+  appendix = "cli"
+  version = sdkmanCliBuildVersion
+    from "build/scripts"
+    include "*.sh*"
 }
 
+assemble.dependsOn assembleArchive
+
 task cleanInstallInit(type: Delete) {
-	delete installBinDir
+    delete installBinDir
 }
 
 task cleanInstallModules(type: Delete) {
@@ -102,16 +90,38 @@ task cleanInstallModules(type: Delete) {
 }
 
 task installInit(type: Copy, dependsOn: [cleanInstallInit, prepareScripts]) {
-	from "build/scripts"
-	into installBinDir
-	include "gvm-init.sh"
+    from "build/scripts"
+    into installBinDir
+    include "sdkman-init.sh"
 }
 
 task installModules(type: Copy, dependsOn: [cleanInstallModules, prepareScripts]) {
     from "build/scripts"
     into installSrcDir
-    include "gvm-*.sh"
-    exclude "gvm-init.sh"
+    include "sdkman-*.sh"
+    exclude "sdkman-init.sh"
 }
 
 task install(dependsOn: [installInit, installModules])
+
+bintray {
+    user = System.getenv('BINTRAY_USERNAME')
+    key = System.getenv('BINTRAY_API_KEY')
+    filesSpec {
+        from 'build/distributions'
+        into '.'
+    }
+    pkg {
+        repo = 'generic'
+        name = 'sdkman-cli'
+        userOrg = 'sdkman'
+        licenses = ['Apache-2.0']
+        vcsUrl = 'https://github.com/sdkman/sdkman-cli.git'
+        version {
+            name = sdkmanCliBuildVersion
+            desc = 'Binary zip distribution of SDKMAN bash client.'
+            released  = new Date()
+        }
+    }
+}
+
